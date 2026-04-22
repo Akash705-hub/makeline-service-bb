@@ -1,10 +1,25 @@
 package main
 
+import "time"
+
 type Order struct {
-	OrderID    string `json:"orderId"`
-	CustomerID string `json:"customerId"`
-	Items      []Item `json:"items"`
-	Status     Status `json:"status"`
+	OrderID    string       `json:"orderId"`
+	CustomerID string       `json:"customerId"`
+	Items      []Item       `json:"items"`
+	Status     Status       `json:"status"`
+	Shipping   ShippingInfo `json:"shipping"`
+}
+
+type ShippingInfo struct {
+	Address1       string    `json:"address1"`
+	Address2       string    `json:"address2"`
+	City           string    `json:"city"`
+	Province       string    `json:"province"`
+	PostalCode     string    `json:"postalCode"`
+	Country        string    `json:"country"`
+	ShippedAt      time.Time `json:"shippedAt" bson:"shippedAt"`
+	Duration       int       `json:"duration"`
+	TrackingNumber string    `json:"trackingNumber" bson:"trackingNumber"`
 }
 
 type Status int
@@ -22,10 +37,11 @@ type Item struct {
 }
 
 type OrderRepo interface {
-	GetPendingOrders() ([]Order, error)
+	GetAllOrders() ([]Order, error)
 	GetOrder(id string) (Order, error)
 	InsertOrders(orders []Order) error
 	UpdateOrder(order Order) error
+	DeleteOrder(id string) error
 }
 
 type OrderService struct {
