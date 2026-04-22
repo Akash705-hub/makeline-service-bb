@@ -103,6 +103,33 @@ func (r *CosmosDBOrderRepo) GetPendingOrders() ([]Order, error) {
 	return orders, nil
 }
 
+func (r *CosmosDBOrderRepo) GetAllOrders() ([]Order, error) {
+	var orders []Order
+
+	pk := azcosmos.NewPartitionKeyString(r.partitionKey.Value)
+
+	queryPager := r.db.NewQueryItemsPager("SELECT * FROM o", pk, nil)
+
+	for queryPager.More() {
+		queryResponse, err := queryPager.NextPage(context.Background())
+		if err != nil {
+			log.Printf("failed to get next page: %v\n", err)
+			return nil, err
+		}
+
+		for _, item := range queryResponse.Items {
+			var order Order
+			err := json.Unmarshal(item, &order)
+			if err != nil {
+				log.Printf("failed to deserialize order: %v\n", err)
+				return nil, err
+			}
+			orders = append(orders, order)
+		}
+	}
+	return orders, nil
+}
+
 func (r *CosmosDBOrderRepo) GetOrder(id string) (Order, error) {
 	pk := azcosmos.NewPartitionKeyString(r.partitionKey.Value)
 	opt := &azcosmos.QueryOptions{
@@ -210,5 +237,28 @@ func (r *CosmosDBOrderRepo) UpdateOrder(order Order) error {
 		log.Printf("failed to patch item: %v\n", err)
 		return err
 	}
+	return nil
+}
+
+// Deletes an order by OrderID
+func (r *CosmosDBOrderRepo) DeleteOrder(id string) error {
+	existingId, err := r.findOrderIdByOrderId(id)
+	if err != nil {
+		log.Printf("failed to find order id: %v\n", err)
+		return err
+	}
+	if existingId == "" {
+		log.Printf("No order found with ID %s to delete", id)
+		return nil
+	}
+
+	pk := azcosmos.NewPartitionKeyString(r.partitionKey.Value)
+	_, err = r.db.DeleteItem(context.Background(), pk, existingId, nil)
+	if err != nil {
+		log.Printf("failed to delete item: %v\n", err)
+		return err
+	}
+
+	log.Printf("Deleted order with OrderID %s (Cosmos ID: %s)", id, existingId)
 	return nil
 }

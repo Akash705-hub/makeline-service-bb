@@ -145,3 +145,46 @@ func (r *MongoDBOrderRepo) UpdateOrder(order Order) error {
 	log.Printf("Matched %v documents and updated %v documents.\n", updateResult.MatchedCount, updateResult.ModifiedCount)
 	return nil
 }
+
+func (r *MongoDBOrderRepo) GetAllOrders() ([]Order, error) {
+	ctx := context.TODO()
+
+	var orders []Order
+	cursor, err := r.db.Find(ctx, bson.M{})
+	if err != nil {
+		log.Printf("Failed to find records: %s", err)
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	if err := cursor.Err(); err != nil {
+		log.Printf("Failed to find records: %s", err)
+		return nil, err
+	}
+
+	for cursor.Next(ctx) {
+		var order Order
+		if err := cursor.Decode(&order); err != nil {
+			log.Printf("Failed to decode order: %s", err)
+			return nil, err
+		}
+		orders = append(orders, order)
+	}
+
+	return orders, nil
+}
+
+func (r *MongoDBOrderRepo) DeleteOrder(id string) error {
+	ctx := context.TODO()
+
+	filter := bson.D{{Key: "orderid", Value: bson.D{{Key: "$eq", Value: id}}}}
+
+	deleteResult, err := r.db.DeleteMany(ctx, filter)
+	if err != nil {
+		log.Printf("Failed to delete order: %s", err)
+		return err
+	}
+
+	log.Printf("Deleted %v documents.\n", deleteResult.DeletedCount)
+	return nil
+}
