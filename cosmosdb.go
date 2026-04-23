@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"log"
 	"strings"
-
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/data/azcosmos"
 	"github.com/gofrs/uuid"
@@ -76,12 +75,40 @@ func (r *CosmosDBOrderRepo) GetPendingOrders() ([]Order, error) {
 	var orders []Order
 
 	pk := azcosmos.NewPartitionKeyString(r.partitionKey.Value)
+
 	opt := &azcosmos.QueryOptions{
 		QueryParameters: []azcosmos.QueryParameter{
 			{Name: "@status", Value: Pending},
 		},
 	}
 	queryPager := r.db.NewQueryItemsPager("SELECT * FROM o WHERE o.status = @status", pk, opt)
+
+	for queryPager.More() {
+		queryResponse, err := queryPager.NextPage(context.Background())
+		if err != nil {
+			log.Printf("failed to get next page: %v\n", err)
+			return nil, err
+		}
+
+		for _, item := range queryResponse.Items {
+			var order Order
+			err := json.Unmarshal(item, &order)
+			if err != nil {
+				log.Printf("failed to deserialize order: %v\n", err)
+				return nil, err
+			}
+			orders = append(orders, order)
+		}
+	}
+	return orders, nil
+}
+
+func (r *CosmosDBOrderRepo) GetAllOrders() ([]Order, error) {
+	var orders []Order
+
+	pk := azcosmos.NewPartitionKeyString(r.partitionKey.Value)
+
+	queryPager := r.db.NewQueryItemsPager("SELECT * FROM o", pk, nil)
 
 	for queryPager.More() {
 		queryResponse, err := queryPager.NextPage(context.Background())
@@ -133,36 +160,20 @@ func (r *CosmosDBOrderRepo) GetOrder(id string) (Order, error) {
 }
 
 func (r *CosmosDBOrderRepo) InsertOrders(orders []Order) error {
-	var counter = 0
+	pk := azcosmos.NewPartitionKeyString(r.partitionKey.Value)
 
 	for _, o := range orders {
-		pk := azcosmos.NewPartitionKeyString(r.partitionKey.Value)
-
-		marshalledOrder, err := json.Marshal(o)
-		if err != nil {
-			log.Printf("failed to marshal order: %v\n", err)
-			return err
+		// Create document map directly
+		doc := map[string]interface{}{
+			"id":         strings.Replace(uuid.Must(uuid.NewV4()).String(), "-", "", -1),
+			"orderId":    o.OrderID,
+			"customerId": o.CustomerID,
+			"items":      o.Items,
+			"status":     o.Status,
 		}
+		doc[r.partitionKey.Key] = r.partitionKey.Value
 
-		var order map[string]interface{}
-		err = json.Unmarshal(marshalledOrder, &order)
-		if err != nil {
-			log.Printf("failed to unmarshal order: %v\n", err)
-			return err
-		}
-
-		// add id with value of uuid.NewV4() to marhsalled order
-		uuidWithHyphen, err := uuid.NewV4()
-		if err != nil {
-			log.Printf("failed to generate uuid: %v\n", err)
-			return err
-		}
-		uuid := strings.Replace(uuidWithHyphen.String(), "-", "", -1)
-		order["id"] = uuid
-
-		order[r.partitionKey.Key] = r.partitionKey.Value
-
-		marshalledOrder, err = json.Marshal(order)
+		marshalledOrder, err := json.Marshal(doc)
 		if err != nil {
 			log.Printf("failed to marshal order: %v\n", err)
 			return err
@@ -173,52 +184,81 @@ func (r *CosmosDBOrderRepo) InsertOrders(orders []Order) error {
 			log.Printf("failed to create item: %v\n", err)
 			return err
 		}
-
-		// increment counter for each order inserted
-		counter++
 	}
 
-	log.Printf("Inserted %v documents into database\n", counter)
-
+	log.Printf("Inserted %d documents into database\n", len(orders))
 	return nil
 }
 
-func (r *CosmosDBOrderRepo) UpdateOrder(order Order) error {
-	var existingOrderId string
+func (r *CosmosDBOrderRepo) findOrderIdByOrderId(orderId string) (string, error) {
 	pk := azcosmos.NewPartitionKeyString(r.partitionKey.Value)
 	opt := &azcosmos.QueryOptions{
 		QueryParameters: []azcosmos.QueryParameter{
-			{Name: "@orderId", Value: order.OrderID},
+			{Name: "@orderId", Value: orderId},
 		},
 	}
-	queryPager := r.db.NewQueryItemsPager("SELECT * FROM o WHERE o.orderId = @orderId", pk, opt)
+	queryPager := r.db.NewQueryItemsPager("SELECT o.id FROM o WHERE o.orderId = @orderId", pk, opt)
 
 	for queryPager.More() {
 		queryResponse, err := queryPager.NextPage(context.Background())
 		if err != nil {
-			break
+			return "", err
 		}
-
 		for _, item := range queryResponse.Items {
-			var order map[string]interface{}
-			err = json.Unmarshal(item, &order)
-			if err != nil {
-				log.Printf("failed to deserialize order: %v\n", err)
-				return err
+			var doc map[string]interface{}
+			if err := json.Unmarshal(item, &doc); err == nil {
+				if id, ok := doc["id"].(string); ok {
+					return id, nil
+				}
 			}
-			existingOrderId = order["id"].(string)
-			break
 		}
 	}
+	return "", nil
+}
 
+func (r *CosmosDBOrderRepo) UpdateOrder(order Order) error {
+	existingOrderId, err := r.findOrderIdByOrderId(order.OrderID)
+	if err != nil {
+		log.Printf("failed to find order id: %v\n", err)
+		return err
+	}
+	if existingOrderId == "" {
+		log.Printf("Order %s not found for update", order.OrderID)
+		return nil
+	}
+
+	pk := azcosmos.NewPartitionKeyString(r.partitionKey.Value)
 	patch := azcosmos.PatchOperations{}
 	patch.AppendReplace("/status", order.Status)
+	patch.AppendReplace("/items", order.Items)
 
-	_, err := r.db.PatchItem(context.Background(), pk, existingOrderId, patch, nil)
+	_, err = r.db.PatchItem(context.Background(), pk, existingOrderId, patch, nil)
 	if err != nil {
-		log.Printf("failed to replace item: %v\n", err)
+		log.Printf("failed to patch item: %v\n", err)
+		return err
+	}
+	return nil
+}
+
+// Deletes an order by OrderID
+func (r *CosmosDBOrderRepo) DeleteOrder(id string) error {
+	existingId, err := r.findOrderIdByOrderId(id)
+	if err != nil {
+		log.Printf("failed to find order id: %v\n", err)
+		return err
+	}
+	if existingId == "" {
+		log.Printf("No order found with ID %s to delete", id)
+		return nil
+	}
+
+	pk := azcosmos.NewPartitionKeyString(r.partitionKey.Value)
+	_, err = r.db.DeleteItem(context.Background(), pk, existingId, nil)
+	if err != nil {
+		log.Printf("failed to delete item: %v\n", err)
 		return err
 	}
 
+	log.Printf("Deleted order with OrderID %s (Cosmos ID: %s)", id, existingId)
 	return nil
 }
